@@ -1,0 +1,5 @@
+{
+  "rpm.pin": 3,
+  "rpm.buffer_time": 5000,
+  "rpm.refresh_clock": 250
+}
