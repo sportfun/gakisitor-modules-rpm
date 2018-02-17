@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/sportfun/gakisitor/config"
+	"github.com/sportfun/gakisitor/env"
 	"github.com/sportfun/gakisitor/log"
-	"gopkg.in/sportfun/gakisitor.v0/env"
-	"gopkg.in/sportfun/gakisitor.v0/module"
+	"github.com/sportfun/gakisitor/module"
 )
 
 type moduleImpl struct {
