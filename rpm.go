@@ -11,7 +11,7 @@ import (
 )
 
 type rpm struct {
-	pin        int
+	pin        string
 	clock      time.Duration
 	bufferTemp time.Duration
 
@@ -24,6 +24,7 @@ type rpm struct {
 }
 
 var errWait = errors.New("")
+var errInvalidPin = errors.New("invalid configuration pin")
 
 func (rpm *rpm) shift() {
 	rpm.mtx.Lock()
@@ -46,9 +47,12 @@ func (rpm *rpm) get() (int64, error) {
 
 func (rpm *rpm) start() error {
 	rpm.kill = make(chan struct{})
+	p := gpioreg.ByName(rpm.pin)
+	if p == nil {
+		return errInvalidPin
+	}
 
 	go func(kill <-chan struct{}) {
-		p := gpioreg.ByName(fmt.Sprintf("%d", rpm.pin))
 
 		for {
 			select {

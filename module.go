@@ -9,6 +9,7 @@ import (
 	"github.com/sportfun/gakisitor/env"
 	"github.com/sportfun/gakisitor/log"
 	"github.com/sportfun/gakisitor/module"
+	"periph.io/x/periph/host"
 )
 
 type moduleImpl struct {
@@ -36,6 +37,10 @@ func (m *moduleImpl) Start(q *module.NotificationQueue, l log.Logger) error {
 	if l == nil {
 		m.state = env.PanicState
 		return fmt.Errorf("logger is not set")
+	}
+
+	if _, err := host.Init(); err != nil {
+		return err
 	}
 
 	m.logger = l
@@ -73,11 +78,16 @@ func (m *moduleImpl) Configure(properties *config.ModuleDefinition) error {
 	}
 
 	// Check pin configuration
-	if pin, err := loadConfigurationItem(items, "rpm.pin"); err != nil {
+	_, ok = items["rpm.pin"]
+	if !ok {
 		m.state = env.PanicState
-		return err
-	} else {
-		m.engine.pin = int(pin)
+		return fmt.Errorf("invalid value of 'rpm.pin' in configuration")
+	}
+
+	m.engine.pin, ok = items["rpm.pin"].(string)
+	if !ok {
+		m.state = env.PanicState
+		return fmt.Errorf("invalid value of 'rpm.pin' in configuration")
 	}
 
 	// Check buffer configuration
@@ -106,9 +116,9 @@ func (m *moduleImpl) Process() error {
 		return nil
 	}
 
-	if rpm, err := m.engine.get(); err != nil {
+	if rpm, err := m.engine.get(); err == nil {
 		m.logger.Debug(debugRpmCalculated.More("value", rpm))
-		m.notifications.NotifyData(m.Name(), "%f", rpm)
+		m.notifications.NotifyData(m.Name(), "%d", rpm)
 	}
 	return nil
 }
