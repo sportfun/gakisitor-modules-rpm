@@ -1,89 +1,107 @@
 package main
 
 import (
-	"errors"
-	"fmt"
-	"sync"
-	"time"
-
+	"context"
 	"periph.io/x/periph/conn/gpio"
-	"periph.io/x/periph/conn/gpio/gpioreg"
+	"time"
 )
 
+type GPIO interface {
+	register(string) error
+	egde() <-chan gpio.Level
+}
+
 type rpm struct {
-	pin        string
-	clock      time.Duration
-	bufferTemp time.Duration
+	context.Context
+	gpio GPIO
 
-	lastRefresh time.Time
-	lastLevel   gpio.Level
-	buffer      []time.Time
+	io   chan interface{}
+	kill chan interface{}
 
-	mtx  sync.Mutex
-	kill chan struct{}
+	bufferSession time.Duration
+	refreshClock  time.Duration
+	correct       float64
 }
 
-var errWait = errors.New("")
-var errInvalidPin = errors.New("invalid configuration pin")
-
-func (rpm *rpm) shift() {
-	rpm.mtx.Lock()
-	defer rpm.mtx.Unlock()
-	for len(rpm.buffer) > 0 && time.Since(rpm.buffer[0]) > rpm.bufferTemp {
-		rpm.buffer = rpm.buffer[1:]
+func (rpm *rpm) configure(pin string) (<-chan interface{}, error) {
+	if err := rpm.gpio.register(pin); err != nil {
+		return nil, err
 	}
+	rpm.io = make(chan interface{})
+	return rpm.io, nil
 }
 
-func (rpm *rpm) get() (int64, error) {
-	if time.Since(rpm.lastRefresh) < rpm.clock {
-		return 0, errWait
-	}
+func (rpm *rpm) start() {
+	rpm.kill = make(chan interface{})
 
-	rpm.shift()
-	rpm.lastRefresh = time.Now()
+	go func(kill <-chan interface{}) {
+		var buffer []time.Time
+		var lastLevel gpio.Level = gpio.Low
+		var lastRefresh time.Time = time.Now()
 
-	return int64(float64(len(rpm.buffer)) / float64(rpm.bufferTemp) * float64(60*time.Second)), nil
-}
-
-func (rpm *rpm) start() error {
-	rpm.kill = make(chan struct{})
-	p := gpioreg.ByName(rpm.pin)
-	if p == nil {
-		return errInvalidPin
-	}
-
-	go func(kill <-chan struct{}) {
-
+		edge := rpm.gpio.egde()
 		for {
 			select {
 			case <-kill:
 				return
-			case level := <-waitForEdge(p):
-				rpm.shift()
-				rpm.mtx.Lock()
-				if level != rpm.lastLevel {
-					rpm.lastLevel = level
+
+			case level := <-edge:
+				if level != lastLevel {
+					lastLevel = level
 					if level == gpio.Low {
-						rpm.buffer = append(rpm.buffer, time.Now())
+						buffer = append(buffer, time.Now())
 					}
 				}
-				rpm.mtx.Unlock()
+
+				if time.Since(lastRefresh) > rpm.refreshClock {
+					rpm.calc(buffer)
+					lastRefresh = time.Now()
+				}
+
 			}
 		}
 	}(rpm.kill)
-	return nil
 }
 
-func (rpm *rpm) stop() error {
-	rpm.kill <- struct{}{}
-	return nil
+func (rpm *rpm) calc(buffer []time.Time) {
+	// remove old value
+	if len(buffer) == 0 || time.Since(buffer[len(buffer)-1]) > rpm.bufferSession {
+		buffer = nil
+	} else {
+		var i int
+		for i = 0; i < len(buffer); i++ {
+			if time.Since(buffer[i]) <= rpm.bufferSession {
+				break
+			}
+		}
+		buffer = buffer[i:]
+	}
+
+	var speed float64
+	if buffer == nil {
+		speed = 0
+	} else {
+		speed = float64(len(buffer)) / float64(buffer[len(buffer)-1].Sub(buffer[0])) * float64(time.Minute)
+	}
+
+	select {
+	case <-rpm.kill:
+	case rpm.io <- speed:
+	}
 }
 
-func waitForEdge(pin gpio.PinIO) <-chan gpio.Level {
-	out := make(chan gpio.Level)
-	go func(pin gpio.PinIO) {
-		pin.WaitForEdge(-1)
-		out <- pin.Read()
-	}(pin)
-	return out
+func (rpm *rpm) stop() {
+	safelyClose(&rpm.kill)
+}
+
+func (rpm *rpm) close() {
+	safelyClose(&rpm.kill)
+	safelyClose(&rpm.io)
+}
+
+func safelyClose(c *chan interface{}) {
+	if *c != nil {
+		close(*c)
+	}
+	*c = nil
 }
