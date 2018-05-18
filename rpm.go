@@ -4,6 +4,8 @@ import (
 	"context"
 	"periph.io/x/periph/conn/gpio"
 	"time"
+
+	"github.com/sirupsen/logrus"
 )
 
 type GPIO interface {
@@ -34,10 +36,12 @@ func (rpm *rpm) configure(pin string) (<-chan interface{}, error) {
 func (rpm *rpm) start() {
 	rpm.kill = make(chan interface{})
 
+// TODO: Priorize tick (select -> default -> select)
 	go func(kill <-chan interface{}) {
 		var buffer []time.Time
 		var lastLevel gpio.Level = gpio.Low
 		var lastRefresh time.Time = time.Now()
+
 
 		edge := rpm.gpio.egde()
 		for {
@@ -45,7 +49,12 @@ func (rpm *rpm) start() {
 			case <-kill:
 				return
 
+			case <-time.Tick(rpm.refreshClock):
+				buffer = rpm.calc(buffer)
+				lastRefresh = time.Now()
+
 			case level := <-edge:
+				logrus.Debugf("LEVEL: %v", level)
 				if level != lastLevel {
 					lastLevel = level
 					if level == gpio.Low {
@@ -54,7 +63,7 @@ func (rpm *rpm) start() {
 				}
 
 				if time.Since(lastRefresh) > rpm.refreshClock {
-					rpm.calc(buffer)
+					buffer = rpm.calc(buffer)
 					lastRefresh = time.Now()
 				}
 
@@ -63,7 +72,7 @@ func (rpm *rpm) start() {
 	}(rpm.kill)
 }
 
-func (rpm *rpm) calc(buffer []time.Time) {
+func (rpm *rpm) calc(buffer []time.Time) []time.Time {
 	// remove old value
 	if len(buffer) == 0 || time.Since(buffer[len(buffer)-1]) > rpm.bufferSession {
 		buffer = nil
@@ -74,20 +83,26 @@ func (rpm *rpm) calc(buffer []time.Time) {
 				break
 			}
 		}
+		logrus.Debugf("REMOVE %d ITEM: %v => %v < %v", i, buffer[i], time.Since(buffer[i]), rpm.bufferSession)
 		buffer = buffer[i:]
 	}
 
 	var speed float64
-	if buffer == nil {
+	if len(buffer) < 2 {
 		speed = 0
 	} else {
 		speed = float64(len(buffer)) / float64(buffer[len(buffer)-1].Sub(buffer[0])) * float64(time.Minute)
 	}
 
+	if buffer != nil {
+		logrus.Debugf("SPEED: %v (%v/%v)", speed, len(buffer), float64(buffer[len(buffer)-1].Sub(buffer[0])))
+	}
 	select {
 	case <-rpm.kill:
 	case rpm.io <- speed:
 	}
+
+	return buffer
 }
 
 func (rpm *rpm) stop() {
