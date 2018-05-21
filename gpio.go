@@ -28,10 +28,12 @@ func (inst *_gpio) register(pin string) error {
 func (inst *_gpio) edge(ctx context.Context) <-chan gpio.Level {
 	levels := make(chan gpio.Level)
 	go func(pin gpio.PinIO, levels chan<- gpio.Level) {
-		pin.WaitForEdge(-1)
-		select {
-		case <-ctx.Done():
-		case levels <- pin.Read():
+		for {
+			pin.WaitForEdge(-1)
+			select {
+			case <-ctx.Done():
+			case levels <- pin.Read():
+			}
 		}
 	}(inst.pin, levels)
 	return levels
