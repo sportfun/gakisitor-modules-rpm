@@ -6,18 +6,24 @@ import (
 	"periph.io/x/periph/conn/gpio"
 	"testing"
 	"time"
+	"context"
 )
 
 type testingGPIO struct{}
 
 func (*testingGPIO) register(string) error { return nil }
-func (*testingGPIO) egde() <-chan gpio.Level {
+func (*testingGPIO) edge(ctx context.Context) <-chan gpio.Level {
 	out := make(chan gpio.Level)
 	go func(out chan<- gpio.Level) {
 		for {
 			out <- gpio.High
 			out <- gpio.Low
 			time.Sleep(50 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 		}
 	}(out)
 
@@ -25,7 +31,7 @@ func (*testingGPIO) egde() <-chan gpio.Level {
 }
 
 func TestPlugin(t *testing.T) {
-	_rpm.gpio = &testingGPIO{}
+	engine.gpio = &testingGPIO{}
 
 	desc := plugin_test.PluginTestDesc{
 		ConfigJSON:   `{"gpio":{"pin": "NONE"},"timing":{"buffer": "1000ms","clock": "250ms"},"correct": 0.97}`,

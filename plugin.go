@@ -9,9 +9,11 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"github.com/sirupsen/logrus"
 )
 
-var _rpm = rpm{gpio: &_gpio{}}
+var engine = rpm{gpio: &_gpio{}}
+var log = logrus.WithField("plugin", "rpm")
 
 var Plugin = plugin.Plugin{
 	Name: "RPM Plugin",
@@ -24,7 +26,7 @@ var Plugin = plugin.Plugin{
 		}
 
 		// process
-		defer func() { _rpm.close() }()
+		defer func() { engine.close() }()
 		for {
 			select {
 			case <-ctx.Done():
@@ -39,11 +41,17 @@ var Plugin = plugin.Plugin{
 				case plugin.StatusPluginInstruction:
 					channels.Status <- state
 				case plugin.StartSessionInstruction:
+					if state == plugin.InSessionState {
+						break
+					}
 					state = plugin.InSessionState
-					_rpm.start()
+					engine.start()
 				case plugin.StopSessionInstruction:
+					if state == plugin.IdleState {
+						break
+					}
 					state = plugin.IdleState
-					_rpm.stop()
+					engine.stop()
 				}
 
 			case value, open := <-speed:
@@ -51,7 +59,7 @@ var Plugin = plugin.Plugin{
 					continue
 				}
 
-				go func() { channels.Data <- value.(float64) * _rpm.correct }()
+				go func() { channels.Data <- value.(float64) * engine.correct }()
 			}
 		}
 	},
@@ -84,17 +92,17 @@ func configure(profile profile.Plugin) (speed <-chan interface{}, err error) {
 	if bufferSession, err := time.ParseDuration(fmt.Sprint(prfTimingBuffer)); err != nil {
 		return nil, errors.WithMessage(err, "timing.buffer")
 	} else {
-		_rpm.bufferSession = bufferSession
+		engine.bufferSession = bufferSession
 	}
 	if refreshClock, err := time.ParseDuration(fmt.Sprint(prfTimingClock)); err != nil {
 		return nil, errors.WithMessage(err, "timing.clock")
 	} else {
-		_rpm.refreshClock = refreshClock
+		engine.refreshClock = refreshClock
 	}
 	if correct, err := strconv.ParseFloat(fmt.Sprint(prfCorrect), 64); err != nil {
 		return nil, errors.WithMessage(err, "timing.clock")
 	} else {
-		_rpm.correct = correct
+		engine.correct = correct
 	}
-	return _rpm.configure(fmt.Sprint(prfGPIO))
+	return engine.configure(fmt.Sprint(prfGPIO))
 }

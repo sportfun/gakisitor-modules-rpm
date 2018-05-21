@@ -2,15 +2,14 @@ package main
 
 import (
 	"context"
+	"math"
 	"periph.io/x/periph/conn/gpio"
 	"time"
-
-	"github.com/sirupsen/logrus"
 )
 
 type GPIO interface {
 	register(string) error
-	egde() <-chan gpio.Level
+	edge(context.Context) <-chan gpio.Level
 }
 
 type rpm struct {
@@ -36,17 +35,17 @@ func (rpm *rpm) configure(pin string) (<-chan interface{}, error) {
 func (rpm *rpm) start() {
 	rpm.kill = make(chan interface{})
 
-// TODO: Priorize tick (select -> default -> select)
 	go func(kill <-chan interface{}) {
 		var buffer []time.Time
 		var lastLevel gpio.Level = gpio.Low
 		var lastRefresh time.Time = time.Now()
 
-
-		edge := rpm.gpio.egde()
+		ctx, cancel := context.WithCancel(context.Background())
+		edge := rpm.gpio.edge(ctx)
 		for {
 			select {
 			case <-kill:
+				cancel()
 				return
 
 			case <-time.Tick(rpm.refreshClock):
@@ -54,7 +53,6 @@ func (rpm *rpm) start() {
 				lastRefresh = time.Now()
 
 			case level := <-edge:
-				logrus.Debugf("LEVEL: %v", level)
 				if level != lastLevel {
 					lastLevel = level
 					if level == gpio.Low {
@@ -70,6 +68,8 @@ func (rpm *rpm) start() {
 			}
 		}
 	}(rpm.kill)
+
+	log.Debug("start session")
 }
 
 func (rpm *rpm) calc(buffer []time.Time) []time.Time {
@@ -83,7 +83,6 @@ func (rpm *rpm) calc(buffer []time.Time) []time.Time {
 				break
 			}
 		}
-		logrus.Debugf("REMOVE %d ITEM: %v => %v < %v", i, buffer[i], time.Since(buffer[i]), rpm.bufferSession)
 		buffer = buffer[i:]
 	}
 
@@ -94,12 +93,14 @@ func (rpm *rpm) calc(buffer []time.Time) []time.Time {
 		speed = float64(len(buffer)) / float64(buffer[len(buffer)-1].Sub(buffer[0])) * float64(time.Minute)
 	}
 
-	if buffer != nil {
-		logrus.Debugf("SPEED: %v (%v/%v)", speed, len(buffer), float64(buffer[len(buffer)-1].Sub(buffer[0])))
+	if math.IsInf(speed, 0) {
+		speed = 0
 	}
+
 	select {
 	case <-rpm.kill:
 	case rpm.io <- speed:
+		log.Debugf("RPM speed: %.2f", speed)
 	}
 
 	return buffer
@@ -107,11 +108,13 @@ func (rpm *rpm) calc(buffer []time.Time) []time.Time {
 
 func (rpm *rpm) stop() {
 	safelyClose(&rpm.kill)
+	log.Debug("stop session")
 }
 
 func (rpm *rpm) close() {
 	safelyClose(&rpm.kill)
 	safelyClose(&rpm.io)
+	log.Debug("exit plugin")
 }
 
 func safelyClose(c *chan interface{}) {
