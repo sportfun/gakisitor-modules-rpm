@@ -53,6 +53,8 @@ func (rpm *rpm) start() {
 				lastRefresh = time.Now()
 
 			case level := <-edge:
+				log.Debugf("signal received: %v", level)
+
 				if level != lastLevel {
 					lastLevel = level
 					if level == gpio.Low {
