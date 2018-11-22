@@ -2,8 +2,8 @@ package main
 
 import (
 	"context"
-	"math"
 	"periph.io/x/periph/conn/gpio"
+	"sync/atomic"
 	"time"
 )
 
@@ -16,13 +16,27 @@ type rpm struct {
 	context.Context
 	gpio GPIO
 
-	io   chan interface{}
-	kill chan interface{}
+	io     chan interface{}
+	rtnCnl func()
+	value  uint64
 
-	bufferSession time.Duration
-	refreshClock  time.Duration
+	ioTick        time.Duration
 	correct       float64
 }
+
+type rtnCtxValue []interface{}
+type rtnCtxKey uint
+
+const (
+	ioTick int = iota
+	ioChan
+	rpmValuePtr
+	gpioPtr
+
+	rtnValue    rtnCtxKey = 0xFF
+	minTimeTick           = 120 * time.Millisecond  // ~ 500rpm
+	maxTimeTick           = 1200 * time.Millisecond // ~ 50 rpm
+)
 
 func (rpm *rpm) configure(pin string) (<-chan interface{}, error) {
 	if err := rpm.gpio.register(pin); err != nil {
@@ -33,90 +47,72 @@ func (rpm *rpm) configure(pin string) (<-chan interface{}, error) {
 }
 
 func (rpm *rpm) start() {
-	rpm.kill = make(chan interface{})
+	var rtnCtx context.Context
+	values := rtnCtxValue{rpm.ioTick, rpm.io, &rpm.value, rpm.gpio}
+	valuedCtx := context.WithValue(rpm.Context, rtnValue, values)
 
-	go func(kill <-chan interface{}) {
-		var buffer []time.Time
-		var lastLevel gpio.Level = gpio.Low
-		var lastRefresh time.Time = time.Now()
+	rtnCtx, rpm.rtnCnl = context.WithCancel(valuedCtx)
+	rpm.value = 0
 
-		ctx, cancel := context.WithCancel(context.Background())
-		edge := rpm.gpio.edge(ctx)
-		for {
-			select {
-			case <-kill:
-				cancel()
-				return
-
-			case <-time.Tick(rpm.refreshClock):
-				buffer = rpm.calc(buffer)
-				lastRefresh = time.Now()
-
-			case level := <-edge:
-				log.Debugf("signal received: %v", level)
-
-				if level != lastLevel {
-					lastLevel = level
-					if level == gpio.Low {
-						buffer = append(buffer, time.Now())
-					}
-				}
-
-				if time.Since(lastRefresh) > rpm.refreshClock {
-					buffer = rpm.calc(buffer)
-					lastRefresh = time.Now()
-				}
-
-			}
-		}
-	}(rpm.kill)
-
-	log.Debug("start session")
-}
-
-func (rpm *rpm) calc(buffer []time.Time) []time.Time {
-	// remove old value
-	if len(buffer) == 0 || time.Since(buffer[len(buffer)-1]) > rpm.bufferSession {
-		buffer = nil
-	} else {
-		var i int
-		for i = 0; i < len(buffer); i++ {
-			if time.Since(buffer[i]) <= rpm.bufferSession {
-				break
-			}
-		}
-		buffer = buffer[i:]
-	}
-
-	var speed float64
-	if len(buffer) < 2 {
-		speed = 0
-	} else {
-		speed = float64(len(buffer)) / float64(buffer[len(buffer)-1].Sub(buffer[0])) * float64(time.Minute)
-	}
-
-	if math.IsInf(speed, 0) {
-		speed = 0
-	}
-
-	select {
-	case <-rpm.kill:
-	case rpm.io <- speed:
-		log.Debugf("RPM speed: %.2f", speed)
-	}
-
-	return buffer
+	go rpmRoutine(rtnCtx)
+	go ioRoutine(rtnCtx)
 }
 
 func (rpm *rpm) stop() {
-	safelyClose(&rpm.kill)
-	log.Debug("stop session")
+	//rpm.rtnCnl()
+	//rpm.rtnCnl = nil
 }
 
 func (rpm *rpm) close() {
-	safelyClose(&rpm.kill)
 	safelyClose(&rpm.io)
 	log.Debug("exit plugin")
+}
+
+func rpmRoutine(rtnCtx context.Context) {
+	rtnValue := rtnCtx.Value(rtnValue).(rtnCtxValue)
+	valuePtr := rtnValue[rpmValuePtr].(*uint64)
+	gpioEvent := rtnValue[gpioPtr].(GPIO).edge(rtnCtx)
+
+	lastEvent := time.Now()
+	afterMaxTimeTick := time.After(maxTimeTick)
+
+	for {
+		select {
+		case <-rtnCtx.Done():
+			return
+		case <-afterMaxTimeTick:
+			atomic.SwapUint64(valuePtr, 5e7)
+			afterMaxTimeTick = time.After(maxTimeTick)
+		case <-gpioEvent:
+			since := time.Since(lastEvent)
+			lastEvent = time.Now()
+
+			// Remove some noise
+			if since < minTimeTick || since > maxTimeTick {
+				continue
+			}
+
+			rpm := 6e7 / since.Seconds()
+			atomic.SwapUint64(valuePtr, uint64(rpm))
+			afterMaxTimeTick = time.After(maxTimeTick)
+		}
+	}
+}
+
+func ioRoutine(rtnCtx context.Context) {
+	rtnValue := rtnCtx.Value(rtnValue).(rtnCtxValue)
+	ticks := time.Tick(rtnValue[ioTick].(time.Duration))
+	io := rtnValue[ioChan].(chan interface{})
+	valuePtr := rtnValue[rpmValuePtr].(*uint64)
+
+	for {
+		select {
+		case <-rtnCtx.Done():
+			return
+		case <-ticks:
+			io <- float64(atomic.LoadUint64(valuePtr)) / 1e6
+		}
+	}
 }
 
 func safelyClose(c *chan interface{}) {

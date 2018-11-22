@@ -4,16 +4,16 @@ import (
 	"context"
 	"fmt"
 	"github.com/pkg/errors"
+	"github.com/sirupsen/logrus"
 	"github.com/sportfun/gakisitor/plugin"
 	"github.com/sportfun/gakisitor/profile"
 	"strconv"
 	"strings"
 	"time"
-	"github.com/sirupsen/logrus"
 )
 
-var engine = rpm{gpio: &_gpio{}}
-var log = logrus.WithField("plugin", "rpm")
+var engine = rpm{Context: context.Background(), gpio: &_gpio{}}
+var log = logrus.WithField("plugin", "value")
 
 var Plugin = plugin.Plugin{
 	Name: "RPM Plugin",
@@ -66,7 +66,7 @@ var Plugin = plugin.Plugin{
 }
 
 func configure(profile profile.Plugin) (speed <-chan interface{}, err error) {
-	var prfGPIO, prfTimingBuffer, prfTimingClock, prfCorrect interface{}
+	var prfGPIO, prfTimingClock, prfCorrect interface{}
 
 	// prepare GPIO
 	for _, prfItem := range []struct {
@@ -74,7 +74,6 @@ func configure(profile profile.Plugin) (speed <-chan interface{}, err error) {
 		item *interface{}
 	}{
 		{"gpio.pin", &prfGPIO},
-		{"timing.buffer", &prfTimingBuffer},
 		{"timing.clock", &prfTimingClock},
 		{"correct", &prfCorrect},
 	} {
@@ -89,18 +88,13 @@ func configure(profile profile.Plugin) (speed <-chan interface{}, err error) {
 	}
 
 	// configure engine
-	if bufferSession, err := time.ParseDuration(fmt.Sprint(prfTimingBuffer)); err != nil {
-		return nil, errors.WithMessage(err, "timing.buffer")
-	} else {
-		engine.bufferSession = bufferSession
-	}
 	if refreshClock, err := time.ParseDuration(fmt.Sprint(prfTimingClock)); err != nil {
 		return nil, errors.WithMessage(err, "timing.clock")
 	} else {
-		engine.refreshClock = refreshClock
+		engine.ioTick = refreshClock
 	}
 	if correct, err := strconv.ParseFloat(fmt.Sprint(prfCorrect), 64); err != nil {
-		return nil, errors.WithMessage(err, "timing.clock")
+		return nil, errors.WithMessage(err, "correct")
 	} else {
 		engine.correct = correct
 	}
